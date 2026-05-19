@@ -9,7 +9,7 @@ from PIL import Image
 # =========================
 # 경로 설정
 # =========================
-MODEL_DIR = Path.home() / "ros2_ws/src/tunnel_inspection_sim/models/tunnel"
+MODEL_DIR = Path.home() / "tunnel_ws/src/tunnel_inspection_sim/models/tunnel"
 
 GT_JSON = MODEL_DIR / "gt/cracks_uv_gt.json"
 

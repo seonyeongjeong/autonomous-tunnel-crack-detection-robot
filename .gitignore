@@ -10,6 +10,8 @@ __pycache__/
 # IDE settings
 .vscode/
 .idea/
+.venv/
+venv/
 
 # system and temporary files
 .DS_Store

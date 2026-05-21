@@ -14,7 +14,7 @@
 
 # 좌측 RGB-D 카메라 (Gazebo -> ROS2)
 - ros_topic_name: "/left_camera/image"
-  gz_topic_name: "/left_camera"
+  gz_topic_name: "/left_camera/image"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "ignition.msgs.Image"
   direction: GZ_TO_ROS
@@ -25,9 +25,15 @@
   gz_type_name: "ignition.msgs.Image"
   direction: GZ_TO_ROS
 
+- ros_topic_name: "/left_camera/camera_info"
+  gz_topic_name: "/left_camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "ignition.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
 # 우측 RGB-D 카메라 (Gazebo -> ROS2)
 - ros_topic_name: "/right_camera/image"
-  gz_topic_name: "/right_camera"
+  gz_topic_name: "/right_camera/image"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "ignition.msgs.Image"
   direction: GZ_TO_ROS
@@ -36,6 +42,12 @@
   gz_topic_name: "/right_camera/depth_image"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "ignition.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/right_camera/camera_info"
+  gz_topic_name: "/right_camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "ignition.msgs.CameraInfo"
   direction: GZ_TO_ROS
 
 # 로봇 현재 위치 및 주행 기록 (Gazebo -> ROS2)

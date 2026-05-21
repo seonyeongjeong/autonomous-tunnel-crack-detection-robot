@@ -151,7 +151,7 @@
       <gz_frame_id>left_camera_link</gz_frame_id>
       <update_rate>15.0</update_rate>
       <camera>
-        <horizontal_fov>1.047</horizontal_fov>
+        <horizontal_fov>1.57</horizontal_fov>
         <image>
           <width>640</width>
           <height>480</height>
@@ -172,7 +172,7 @@
       <gz_frame_id>right_camera_link</gz_frame_id>
       <update_rate>15.0</update_rate>
       <camera>
-        <horizontal_fov>1.047</horizontal_fov>
+        <horizontal_fov>1.57</horizontal_fov>
         <image>
           <width>640</width>
           <height>480</height>

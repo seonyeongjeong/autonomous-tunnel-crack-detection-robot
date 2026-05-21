@@ -38,8 +38,22 @@ class CrackDetectorNode(Node):
         
         # [시각화 캔버스 설정]
         self.map_w, self.map_h = 1000, 300
+        self.tunnel_x_min = float(self.declare_parameter('tunnel_x_min', -5.0).value)
+        self.tunnel_x_max = float(self.declare_parameter('tunnel_x_max', 5.0).value)
+        self.odom_origin_world_x = float(self.declare_parameter('odom_origin_world_x', -4.0).value)
+        self.tunnel_length = self.tunnel_x_max - self.tunnel_x_min
+        if self.tunnel_length <= 0.0:
+            self.get_logger().warn("터널 x 범위가 잘못되어 기본값(-5.0~5.0)을 사용합니다.")
+            self.tunnel_x_min = -5.0
+            self.tunnel_x_max = 5.0
+            self.tunnel_length = 10.0
+
         self.unrolled_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 255
-        self.get_logger().info("✅ 시스템 준비 완료! (TF 버그 수정 및 HF 모델 적용)")
+        self.get_logger().info(
+            "✅ 시스템 준비 완료! "
+            f"(터널 X: {self.tunnel_x_min:.1f}~{self.tunnel_x_max:.1f}, "
+            f"odom 원점 월드 X: {self.odom_origin_world_x:.1f})"
+        )
 
     def sync_callback(self, img_msg, depth_msg, info_msg):
         cv_img = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
@@ -87,11 +101,19 @@ class CrackDetectorNode(Node):
                     world_p = do_transform_point(p, transform)
                     
                     # 4. 반원통 전개도 매핑
-                    u = (world_p.point.x + 5.0) / 10.0
+                    # odom은 로봇 스폰 위치를 원점으로 쓰므로, 터널 월드 X로 보정한다.
+                    world_x = world_p.point.x + self.odom_origin_world_x
+                    u = (world_x - self.tunnel_x_min) / self.tunnel_length
+                    if u < 0.0 or u > 1.0:
+                        continue
+
                     theta = math.atan2(world_p.point.z, world_p.point.y) 
                     v = max(0, min(1, theta / math.pi))
                     
-                    px, py = int(u * self.map_w), int((1.0 - v) * self.map_h)
+                    px = int(round(u * (self.map_w - 1)))
+                    py = int(round((1.0 - v) * (self.map_h - 1)))
+                    px = max(0, min(self.map_w - 1, px))
+                    py = max(0, min(self.map_h - 1, py))
                     
                     # 전개도에 핀 마커(빨간점) 찍기
                     cv2.circle(self.unrolled_map, (px, py), 5, (0, 0, 255), -1)

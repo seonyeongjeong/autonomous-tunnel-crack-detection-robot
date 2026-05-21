@@ -32,6 +32,8 @@ class CrackDetectorNode(Node):
         # 양쪽 RGB-D 카메라를 각각 동기화해서 같은 탐지/매핑 파이프라인으로 처리한다.
         self.camera_subscribers = []
         self.camera_synchronizers = []
+        self.logged_camera_frames = set()
+        self.mapped_log_counts = {}
         for camera_name in ('left', 'right'):
             self.create_camera_synchronizer(camera_name)
         
@@ -83,6 +85,19 @@ class CrackDetectorNode(Node):
     def sync_callback(self, camera_name, img_msg, depth_msg, info_msg):
         cv_img = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
         cv_depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+        source_frame = f'{camera_name}_camera_optical_frame'
+        reported_frame = info_msg.header.frame_id
+        if camera_name not in self.logged_camera_frames:
+            if reported_frame and reported_frame != source_frame:
+                self.get_logger().warn(
+                    f"{camera_name} camera_info frame_id는 '{reported_frame}'이지만 "
+                    f"depth 좌표는 '{source_frame}'로 변환합니다."
+                )
+            else:
+                self.get_logger().info(
+                    f"{camera_name} camera depth 좌표 frame: {source_frame}"
+                )
+            self.logged_camera_frames.add(camera_name)
         
         fx, fy, cx, cy = info_msg.k[0], info_msg.k[4], info_msg.k[2], info_msg.k[5]
         
@@ -111,7 +126,7 @@ class CrackDetectorNode(Node):
                 
                 try:
                     p = PointStamped()
-                    p.header.frame_id = info_msg.header.frame_id
+                    p.header.frame_id = source_frame
                     p.header.stamp = img_msg.header.stamp
                     p.point.x, p.point.y, p.point.z = float(wx), float(wy), float(wz)
                     
@@ -119,7 +134,7 @@ class CrackDetectorNode(Node):
                     # a) 먼저 카메라 -> odom(절대 좌표계)까지의 변환 행렬을 찾음
                     transform = self.tf_buffer.lookup_transform(
                         'odom', 
-                        info_msg.header.frame_id, 
+                        source_frame,
                         rclpy.time.Time() # 가장 최신 TF 사용
                     )
                     # b) 찾은 변환 행렬을 점에 직접 곱해줌
@@ -142,6 +157,14 @@ class CrackDetectorNode(Node):
                     
                     # 전개도에 핀 마커(빨간점) 찍기
                     cv2.circle(self.unrolled_map, (px, py), 5, (0, 0, 255), -1)
+                    log_count = self.mapped_log_counts.get(camera_name, 0)
+                    if log_count < 5:
+                        self.get_logger().info(
+                            f"{camera_name} mapped: "
+                            f"world=({world_x:.2f}, {world_p.point.y:.2f}, {world_p.point.z:.2f}), "
+                            f"uv=({u:.2f}, {v:.2f}), pixel=({px}, {py})"
+                        )
+                        self.mapped_log_counts[camera_name] = log_count + 1
                     
                     # 매핑 성공 시 초록색 박스로 변경!
                     cv2.rectangle(cv_img, (u1, v1), (u2, v2), (0, 255, 0), 2)

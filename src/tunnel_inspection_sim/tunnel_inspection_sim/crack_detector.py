@@ -151,7 +151,7 @@ class CrackDetectorNode(Node):
                     v = max(0, min(1, theta / math.pi))
                     
                     px = int(round(u * (self.map_w - 1)))
-                    py = int(round((1.0 - v) * (self.map_h - 1)))
+                    py = int(round(v * (self.map_h - 1)))
                     px = max(0, min(self.map_w - 1, px))
                     py = max(0, min(self.map_h - 1, py))
                     

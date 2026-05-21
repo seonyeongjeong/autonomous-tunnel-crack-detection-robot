@@ -6,18 +6,26 @@ import message_filters
 import cv2
 import numpy as np
 import math
+import os
 from ultralytics import YOLO
+
+# TF2 관련 패키지
 from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import PointStamped
+# 🚨 버그 해결을 위한 명시적 변환 함수 임포트
+import tf2_geometry_msgs 
+from tf2_geometry_msgs import do_transform_point
 
 class CrackDetectorNode(Node):
     def __init__(self):
         super().__init__('crack_detector_node')
         self.bridge = CvBridge()
         
-        # [모델 로드] 첨부한 crack_detector_model.pt 사용
-        model_path = '/home/jen/tunnel_ws/src/tunnel_inspection_sim/models/crack_detector_model.pt'
+        # [신규 모델 적용] Hugging Face에서 다운받은 모델 경로
+        model_path = os.path.expanduser('~/tunnel_ws/src/tunnel_inspection_sim/models/yolov8_crack_seg.pt')
+        self.get_logger().info(f"YOLO 모델 로딩: {model_path}")
         self.yolo_model = YOLO(model_path) 
+        
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -28,10 +36,10 @@ class CrackDetectorNode(Node):
         self.ts = message_filters.ApproximateTimeSynchronizer([img_sub, depth_sub, info_sub], 10, 0.1)
         self.ts.registerCallback(self.sync_callback)
         
-        # [시각화 캔버스 설정] 10m 터널, 0.35m 반지름
+        # [시각화 캔버스 설정]
         self.map_w, self.map_h = 1000, 300
         self.unrolled_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 255
-        self.get_logger().info("✅ 시스템 준비 완료!")
+        self.get_logger().info("✅ 시스템 준비 완료! (TF 버그 수정 및 HF 모델 적용)")
 
     def sync_callback(self, img_msg, depth_msg, info_msg):
         cv_img = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
@@ -39,44 +47,62 @@ class CrackDetectorNode(Node):
         
         fx, fy, cx, cy = info_msg.k[0], info_msg.k[4], info_msg.k[2], info_msg.k[5]
         
-        # 모델 추론 (conf 낮춰서 균열 놓치지 않게)
-        results = self.yolo_model(cv_img, conf=0.01, verbose=True)
+        # 모델 추론
+        results = self.yolo_model(cv_img, conf=0.2, verbose=False)
         
         for r in results:
+            # Segmentation 모델이어도 BBox(네모 박스)는 동일하게 추출 가능!
             for box in r.boxes:
                 u1, v1, u2, v2 = map(int, box.xyxy[0])
                 cu, cv = (u1 + u2) // 2, (v1 + v2) // 2
                 
-                # Median Depth (노이즈 필터링)
+                # 1. 탐지 즉시 파란색 박스 그리기
+                cv2.rectangle(cv_img, (u1, v1), (u2, v2), (255, 0, 0), 2)
+
+                # 2. Median Depth (노이즈 필터링)
                 patch = cv_depth[max(0,cv-5):min(cv_depth.shape[0],cv+5), max(0,cu-5):min(cv_depth.shape[1],cu+5)]
-                Z = np.median(patch[patch > 0])
+                valid_depths = patch[patch > 0]
                 
+                if len(valid_depths) == 0: continue
+                Z = np.median(valid_depths)
                 if np.isnan(Z) or Z < 0.1: continue
 
-                # 3D 좌표 변환
+                # 3. 3D 좌표 계산 (카메라 기준)
                 wx, wy, wz = (cu - cx) * Z / fx, (cv - cy) * Z / fy, Z
                 
-                # TF 좌표 변환 (World 좌표계로)
                 try:
                     p = PointStamped()
                     p.header.frame_id = info_msg.header.frame_id
                     p.header.stamp = img_msg.header.stamp
-                    p.point.x, p.point.y, p.point.z = wx, wy, wz
-                    world_p = self.tf_buffer.transform(p, 'odom')
+                    p.point.x, p.point.y, p.point.z = float(wx), float(wy), float(wz)
                     
-                    # [매핑 수식] 반원통 전개
-                    # u = x / tunnel_length, v = theta / pi
+                    # 🚨 확실한 TF 변환 로직 (버그 해결) 🚨
+                    # a) 먼저 카메라 -> odom(절대 좌표계)까지의 변환 행렬을 찾음
+                    transform = self.tf_buffer.lookup_transform(
+                        'odom', 
+                        info_msg.header.frame_id, 
+                        rclpy.time.Time() # 가장 최신 TF 사용
+                    )
+                    # b) 찾은 변환 행렬을 점에 직접 곱해줌
+                    world_p = do_transform_point(p, transform)
+                    
+                    # 4. 반원통 전개도 매핑
                     u = (world_p.point.x + 5.0) / 10.0
-                    theta = math.atan2(world_p.point.z, world_p.point.y) # 반원통 y, z좌표
+                    theta = math.atan2(world_p.point.z, world_p.point.y) 
                     v = max(0, min(1, theta / math.pi))
                     
                     px, py = int(u * self.map_w), int((1.0 - v) * self.map_h)
                     
-                    # 마커 찍기 (안전: 녹색, 위험: 빨강)
+                    # 전개도에 핀 마커(빨간점) 찍기
                     cv2.circle(self.unrolled_map, (px, py), 5, (0, 0, 255), -1)
-                except: continue
+                    
+                    # 매핑 성공 시 초록색 박스로 변경!
+                    cv2.rectangle(cv_img, (u1, v1), (u2, v2), (0, 255, 0), 2)
+                    cv2.putText(cv_img, "Mapped!", (u1, max(v1 - 10, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                cv2.rectangle(cv_img, (u1, v1), (u2, v2), (0, 0, 255), 2)
+                except Exception as e:
+                    self.get_logger().warn(f"TF 에러: {e}")
+                    continue
         
         cv2.imshow("Camera", cv_img)
         cv2.imshow("Tunnel Unrolled Map", self.unrolled_map)
@@ -88,9 +114,8 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        # 노드 종료 시 최종 전개도 이미지 저장
         cv2.imwrite("final_tunnel_inspection_map.png", node.unrolled_map)
-        node.get_logger().info("💾 최종 진단 전개도가 'final_tunnel_inspection_map.png'로 저장되었습니다.")
+        node.get_logger().info("💾 최종 맵 저장 완료!")
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -72,7 +72,7 @@ def process_yolo_segmentation_to_transparent():
         out_name = os.path.join(output_dir, img_path.stem + "_decal.png")
         cv2.imwrite(out_name, rgba)
 
-    print(f"🎉 Success! Converted transparent crack images are saved in the '{output_dir}' folder.")
+    print(f"Success! Converted transparent crack images are saved in the '{output_dir}' folder.")
 
 # 실행
 if __name__ == "__main__":

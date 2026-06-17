@@ -55,7 +55,7 @@ class CrackDetectorNode(Node):
 
         self.unrolled_map = np.ones((self.map_h, self.map_w, 3), dtype=np.uint8) * 255
         self.get_logger().info(
-            "✅ 시스템 준비 완료! "
+            "시스템 준비 완료! "
             f"(터널 X: {self.tunnel_x_min:.1f}~{self.tunnel_x_max:.1f}, "
             f"odom 원점 월드 X: {self.odom_origin_world_x:.1f}, "
             f"카메라: {'/'.join(self.camera_names)}, "
@@ -144,7 +144,6 @@ class CrackDetectorNode(Node):
                     p.header.stamp = img_msg.header.stamp
                     p.point.x, p.point.y, p.point.z = float(wx), float(wy), float(wz)
                     
-                    # 🚨 확실한 TF 변환 로직 (버그 해결) 🚨
                     # a) 먼저 카메라 -> odom(절대 좌표계)까지의 변환 행렬을 찾음
                     transform = self.tf_buffer.lookup_transform(
                         'odom', 
@@ -208,7 +207,7 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         cv2.imwrite("final_tunnel_inspection_map.png", node.unrolled_map)
-        node.get_logger().info("💾 최종 맵 저장 완료!")
+        node.get_logger().info("최종 맵 저장 완료!")
     finally:
         node.destroy_node()
         rclpy.shutdown()

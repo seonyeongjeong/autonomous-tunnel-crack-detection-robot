@@ -1,4 +1,6 @@
+import csv
 import json
+import math
 from pathlib import Path
 
 import cv2
@@ -9,7 +11,7 @@ from PIL import Image
 # =========================
 # 경로 설정
 # =========================
-MODEL_DIR = Path.home() / "tunnel_ws/src/tunnel_inspection_sim/models/tunnel"
+MODEL_DIR = Path(__file__).resolve().parents[1]
 
 GT_JSON = MODEL_DIR / "gt/cracks_uv_gt.json"
 
@@ -18,6 +20,7 @@ GT_JSON = MODEL_DIR / "gt/cracks_uv_gt.json"
 BASE_TEXTURE = MODEL_DIR / "textures/tunnel_base.png"
 
 OUTPUT_TEXTURE = MODEL_DIR / "tunnel_with_cracks.png"
+OUTPUT_SIZE_GT = MODEL_DIR / "cracks/crack_texture_size_gt.csv"
 
 # base texture가 없을 때 생성할 texture 크기
 TEXTURE_W = 4096
@@ -25,6 +28,61 @@ TEXTURE_H = 4096
 
 # 기본 터널 색상 RGB
 BASE_COLOR = (200, 200, 200)
+
+# 실제 터널 모델 스케일:
+#   x: -5~5 m = 길이 10 m
+#   inner radius: 약 0.35 m = 내경 0.7 m
+TUNNEL_LENGTH_M = 10.0
+TUNNEL_INNER_RADIUS_M = 0.35
+TUNNEL_INNER_DIAMETER_MM = TUNNEL_INNER_RADIUS_M * 2.0 * 1000.0
+TUNNEL_UNROLLED_ARC_MM = math.pi * TUNNEL_INNER_RADIUS_M * 1000.0
+
+# 터널 반원통 mesh의 UV는 PNG 왼쪽 절반(u=0.0~0.5)만 사용한다.
+# u: 옆면~천장~반대쪽 옆면 방향, v: 입구~출구 방향
+TEXTURE_U_MIN = 0.0
+TEXTURE_U_MAX = 0.5
+TEXTURE_V_MIN = 0.0
+TEXTURE_V_MAX = 1.0
+
+# 위험도 기준
+# safe: < 80 mm, caution: 80 mm 이상 160 mm 미만, danger: 160 mm 이상
+SAFE_MAX_DIAGONAL_MM = 80.0
+DANGER_MIN_DIAGONAL_MM = 160.0
+
+# 기준 주변/내부/외부가 위치 순서와 무관하게 섞이도록 배치한다.
+CRACK_TARGET_DIAGONAL_MM = {
+    "crack_001": 115.0,  # caution
+    "crack_002": 230.0,  # danger
+    "crack_003": 65.0,   # safe
+    "crack_004": 155.0,  # caution, threshold 근처
+    "crack_005": 45.0,   # safe
+    "crack_006": 180.0,  # danger
+    "crack_007": 90.0,   # caution
+    "crack_008": 75.0,   # safe, threshold 근처
+    "crack_009": 300.0,  # danger
+    "crack_010": 140.0,  # caution
+}
+DEFAULT_TARGET_DIAGONAL_MM = 115.0
+
+# U는 PNG 왼쪽 절반 안의 반원통 전개 방향, V는 터널 길이 방향이다.
+# 원래 GT 중심이 한 구간에 몰려 있으므로, 합성 직전에 중심을 터널 전체로 재배치한다.
+# 크기와 위치가 정렬돼 보이지 않도록 안전/주의/위험 샘플을 섞어서 둔다.
+CRACK_TARGET_UV_CENTER = {
+    "crack_001": (0.12, 0.14),
+    "crack_002": (0.42, 0.82),
+    "crack_003": (0.31, 0.36),
+    "crack_004": (0.20, 0.68),
+    "crack_005": (0.45, 0.50),
+    "crack_006": (0.10, 0.88),
+    "crack_007": (0.38, 0.22),
+    "crack_008": (0.24, 0.08),
+    "crack_009": (0.32, 0.94),
+    "crack_010": (0.08, 0.58),
+}
+
+# 작은 균열은 padding이 크기 오차를 크게 만들기 때문에 검증용 texture에서는 작게 둔다.
+COMPOSITE_PADDING_PX = 1
+ALPHA_CROP_MARGIN_PX = 2
 # =========================
 
 
@@ -59,6 +117,45 @@ def load_base_texture():
     base[:, :, 2] = BASE_COLOR[2]
     base[:, :, 3] = 255
     return base
+
+
+def resolve_source_image_path(source_image_path, crack_id):
+    """
+    GT JSON에 다른 PC의 absolute path가 남아 있어도 현재 model/cracks 아래 파일을 찾는다.
+    """
+    candidates = []
+
+    if source_image_path:
+        src_path = Path(source_image_path)
+        candidates.append(src_path)
+        candidates.append(MODEL_DIR / "cracks" / src_path.name)
+
+    candidates.append(MODEL_DIR / "cracks" / f"{crack_id}.png")
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return candidates[0] if candidates else None
+
+
+def crop_to_alpha_bbox(crack_rgba, margin_px=2):
+    """
+    Transparent margin을 제거해서 target bbox가 실제 보이는 균열 크기에 가깝게 대응하도록 한다.
+    """
+    alpha = crack_rgba[:, :, 3]
+    ys, xs = np.where(alpha > 0)
+
+    if len(xs) == 0 or len(ys) == 0:
+        return crack_rgba
+
+    h, w = alpha.shape
+    x_min = max(0, int(xs.min()) - margin_px)
+    x_max = min(w, int(xs.max()) + 1 + margin_px)
+    y_min = max(0, int(ys.min()) - margin_px)
+    y_max = min(h, int(ys.max()) + 1 + margin_px)
+
+    return crack_rgba[y_min:y_max, x_min:x_max, :]
 
 
 def alpha_composite_rgba(base_rgba, overlay_rgba):
@@ -132,6 +229,62 @@ def sort_pairs_by_source_uv(pairs):
     return [bottom_left, bottom_right, top_right, top_left]
 
 
+def measure_ordered_quad_m(ordered_pairs):
+    """
+    정렬된 4개 corner의 현재 3D 크기를 계산한다.
+    반환: width, height, diagonal (meter)
+    """
+    pts = np.array([p["world_point"] for p in ordered_pairs], dtype=np.float64)
+    bottom_left, bottom_right, top_right, top_left = pts
+
+    width_m = 0.5 * (
+        np.linalg.norm(bottom_right - bottom_left)
+        + np.linalg.norm(top_right - top_left)
+    )
+    height_m = 0.5 * (
+        np.linalg.norm(top_left - bottom_left)
+        + np.linalg.norm(top_right - bottom_right)
+    )
+    diagonal_m = max(
+        np.linalg.norm(top_right - bottom_left),
+        np.linalg.norm(top_left - bottom_right),
+    )
+
+    return width_m, height_m, diagonal_m
+
+
+def scale_uvs_about_center(dst_uvs, scale):
+    dst = np.array(dst_uvs, dtype=np.float64)
+    center = dst.mean(axis=0)
+    scaled = center + (dst - center) * scale
+    return scaled.tolist()
+
+
+def move_uvs_to_center(dst_uvs, target_center):
+    if target_center is None:
+        return dst_uvs
+
+    dst = np.array(dst_uvs, dtype=np.float64)
+    target = np.array(target_center, dtype=np.float64)
+    current = dst.mean(axis=0)
+    dst += target - current
+    return dst.tolist()
+
+
+def classify_crack_by_diagonal(diagonal_mm):
+    if diagonal_mm < SAFE_MAX_DIAGONAL_MM:
+        return "safe", "green"
+    if diagonal_mm < DANGER_MIN_DIAGONAL_MM:
+        return "caution", "orange"
+    return "danger", "red"
+
+
+def uv_bbox(dst_uvs):
+    us = [uv[0] for uv in dst_uvs]
+    vs = [uv[1] for uv in dst_uvs]
+    return min(us), max(us), min(vs), max(vs)
+
+
 def is_reasonable_target_uv(dst_uvs, max_uv_size=0.25):
     """
     target_uv가 비정상적으로 큰 영역으로 잡힌 경우 skip하기 위한 검사.
@@ -151,11 +304,10 @@ def is_reasonable_target_uv(dst_uvs, max_uv_size=0.25):
     if width > max_uv_size or height > max_uv_size:
         return False
 
-    # UV가 0~1 범위에서 너무 벗어나면 skip
-    if u_min < -0.05 or u_max > 1.05:
+    if u_min < TEXTURE_U_MIN or u_max > TEXTURE_U_MAX:
         return False
 
-    if v_min < -0.05 or v_max > 1.05:
+    if v_min < TEXTURE_V_MIN or v_max > TEXTURE_V_MAX:
         return False
 
     return True
@@ -219,6 +371,21 @@ def main():
 
     cracks = gt["cracks"]
     print(f"Number of cracks: {len(cracks)}")
+    print(
+        "Severity thresholds: "
+        f"safe < {SAFE_MAX_DIAGONAL_MM:.0f} mm, "
+        f"caution < {DANGER_MIN_DIAGONAL_MM:.0f} mm, "
+        f"danger >= {DANGER_MIN_DIAGONAL_MM:.0f} mm"
+    )
+    print(
+        "Tunnel scale: "
+        f"length={TUNNEL_LENGTH_M:.2f} m, "
+        f"inner_diameter={TUNNEL_INNER_DIAMETER_MM:.0f} mm, "
+        f"unrolled_arc={TUNNEL_UNROLLED_ARC_MM:.0f} mm, "
+        f"texture_u={TEXTURE_U_MIN:.1f}~{TEXTURE_U_MAX:.1f}"
+    )
+
+    size_rows = []
 
     for crack in cracks:
         crack_id = crack["crack_id"]
@@ -228,14 +395,14 @@ def main():
             print(f"[SKIP] {crack_id}: source_image_path is None")
             continue
 
-        src_path = Path(source_image_path)
+        src_path = resolve_source_image_path(source_image_path, crack_id)
 
-        if not src_path.exists():
+        if src_path is None or not src_path.exists():
             print(f"[SKIP] {crack_id}: source image not found: {src_path}")
             continue
 
         crack_img = Image.open(src_path).convert("RGBA")
-        crack_rgba = np.array(crack_img)
+        crack_rgba = crop_to_alpha_bbox(np.array(crack_img), margin_px=ALPHA_CROP_MARGIN_PX)
 
         pairs = crack["uv_pairs"]
 
@@ -245,14 +412,42 @@ def main():
 
         ordered_pairs = sort_pairs_by_source_uv(pairs)
         dst_uvs = [p["target_uv"] for p in ordered_pairs]
+        current_width_m, current_height_m, current_diag_m = measure_ordered_quad_m(ordered_pairs)
+
+        if current_diag_m <= 0:
+            print(f"[SKIP] {crack_id}: invalid current diagonal")
+            continue
+
+        target_diag_mm = CRACK_TARGET_DIAGONAL_MM.get(
+            crack_id,
+            DEFAULT_TARGET_DIAGONAL_MM
+        )
+        scale = (target_diag_mm / 1000.0) / current_diag_m
+        dst_uvs = scale_uvs_about_center(dst_uvs, scale)
+        target_uv_center = CRACK_TARGET_UV_CENTER.get(crack_id)
+        dst_uvs = move_uvs_to_center(dst_uvs, target_uv_center)
+        target_width_mm = current_width_m * scale * 1000.0
+        target_height_mm = current_height_m * scale * 1000.0
+        severity, marker_color = classify_crack_by_diagonal(target_diag_mm)
 
         us = [p[0] for p in dst_uvs]
         vs = [p[1] for p in dst_uvs]
+        u_center = float(np.mean(us))
+        v_center = float(np.mean(vs))
+        world_x_m = v_center * TUNNEL_LENGTH_M - TUNNEL_LENGTH_M / 2.0
+        theta_deg = (
+            (u_center - TEXTURE_U_MIN)
+            / (TEXTURE_U_MAX - TEXTURE_U_MIN)
+            * 180.0
+        )
         print(
             f"[DEBUG] {crack_id}: "
             f"u_range={min(us):.4f}~{max(us):.4f}, "
             f"v_range={min(vs):.4f}~{max(vs):.4f}, "
-            f"size=({max(us)-min(us):.4f}, {max(vs)-min(vs):.4f})"
+            f"size=({max(us)-min(us):.4f}, {max(vs)-min(vs):.4f}), "
+            f"center=({u_center:.2f}, {v_center:.2f}), "
+            f"world_x={world_x_m:.2f}m, theta={theta_deg:.1f}deg, "
+            f"target_diag={target_diag_mm:.1f}mm, class={severity}"
         )
 
         if not is_reasonable_target_uv(dst_uvs, max_uv_size=0.25):
@@ -263,7 +458,7 @@ def main():
             canvas,
             crack_rgba,
             dst_uvs,
-            padding_px=40
+            padding_px=COMPOSITE_PADDING_PX
         )
 
         if not ok:
@@ -271,12 +466,44 @@ def main():
             continue
 
         print(f"[OK] composited {crack_id} by bbox")
+        u_min, u_max, v_min, v_max = uv_bbox(dst_uvs)
+        size_rows.append({
+            "crack_id": crack_id,
+            "image_file": src_path.name,
+            "severity": severity,
+            "marker_color": marker_color,
+            "safe_max_diagonal_mm": f"{SAFE_MAX_DIAGONAL_MM:.3f}",
+            "danger_min_diagonal_mm": f"{DANGER_MIN_DIAGONAL_MM:.3f}",
+            "target_diagonal_mm": f"{target_diag_mm:.3f}",
+            "target_width_mm": f"{target_width_mm:.3f}",
+            "target_height_mm": f"{target_height_mm:.3f}",
+            "target_diagonal_to_tunnel_diameter": (
+                f"{target_diag_mm / TUNNEL_INNER_DIAMETER_MM:.6f}"
+            ),
+            "target_u_center": f"{u_center:.6f}",
+            "target_v_center": f"{v_center:.6f}",
+            "target_world_x_m": f"{world_x_m:.3f}",
+            "target_theta_deg": f"{theta_deg:.3f}",
+            "original_diagonal_mm": f"{current_diag_m * 1000.0:.3f}",
+            "scale_factor": f"{scale:.6f}",
+            "u_min": f"{u_min:.9f}",
+            "u_max": f"{u_max:.9f}",
+            "v_min": f"{v_min:.9f}",
+            "v_max": f"{v_max:.9f}",
+        })
 
     # Gazebo OBJ/MTL에서 쓰기 좋게 RGB로 저장
     out_img = Image.fromarray(canvas).convert("RGB")
     out_img.save(OUTPUT_TEXTURE)
 
     print(f"Saved output texture: {OUTPUT_TEXTURE}")
+
+    if size_rows:
+        with open(OUTPUT_SIZE_GT, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(size_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(size_rows)
+        print(f"Saved crack size GT: {OUTPUT_SIZE_GT}")
 
 
 if __name__ == "__main__":

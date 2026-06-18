@@ -69,7 +69,7 @@ class CrackDetectorNode(Node):
             self.declare_parameter('tunnel_x_max', 5.0).value
         )
         self.odom_origin_world_x = float(
-            self.declare_parameter('odom_origin_world_x', -5.0).value
+            self.declare_parameter('odom_origin_world_x', -4.7).value
         )
         self.odom_origin_world_y = float(
             self.declare_parameter('odom_origin_world_y', 0.0).value

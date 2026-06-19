@@ -7,7 +7,7 @@ from pathlib import Path
 
 def load_dataset():
     url = "https://ultralytics.com/assets/crack-seg.zip"
-    zip_path = "crack-seg.zip"
+    zip_path = "crack_preprocess/crack-seg.zip"
 
     if not os.path.exists("./images/test"):
         print("📦 1. Downloading dataset...")
@@ -22,9 +22,9 @@ def load_dataset():
         print("✅ Existing dataset found. Skipping download and extraction.")
     
 def process_yolo_segmentation_to_transparent():
-    img_dir = "./images/test"
-    label_dir = "./labels/test"
-    output_dir = "./transparent_cracks"
+    img_dir = "crack_preprocess/images/test"
+    label_dir = "crack_preprocess/labels/test"
+    output_dir = "crack_preprocess/transparent_cracks"
     os.makedirs(output_dir, exist_ok=True)
 
     # Test 폴더 내의 모든 jpg 이미지 찾기

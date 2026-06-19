@@ -67,3 +67,6 @@
     <https://huggingface.co/OpenSistemas/YOLOv8-crack-seg/tree/main/yolov8n/weights>
 
 ### YouTube
+
+https://youtube.com/watch?v=pLZg_E13_us&si=x81DYS0wqA8a-N9c
+

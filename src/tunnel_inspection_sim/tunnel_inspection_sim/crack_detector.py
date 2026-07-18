@@ -78,13 +78,13 @@ class CrackDetectorNode(Node):
             self.declare_parameter('odom_origin_world_z', 0.09).value
         )
         self.default_conf = float(
-            self.declare_parameter('default_conf', 0.2).value
+            self.declare_parameter('default_conf', 0.25).value
         )
         self.side_conf = float(
-            self.declare_parameter('side_conf', 0.08).value
+            self.declare_parameter('side_conf', 0.25).value
         )
         self.top_conf = float(
-            self.declare_parameter('top_conf', 0.05).value
+            self.declare_parameter('top_conf', 0.20).value
         )
         self.inference_imgsz = int(
             self.declare_parameter('inference_imgsz', 960).value
@@ -888,7 +888,12 @@ class CrackDetectorNode(Node):
         )
 
         # 모델 추론
-        conf = self.top_conf if camera_name == 'top' else self.side_conf
+        confidence_by_camera = {
+            'left': self.side_conf,
+            'right': self.side_conf,
+            'top': self.top_conf,
+        }
+        conf = confidence_by_camera.get(camera_name, self.default_conf)
         results = self.yolo_model(
             cv_img,
             conf=conf,

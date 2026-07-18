@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 
 # =========================
@@ -15,9 +15,21 @@ MODEL_DIR = Path(__file__).resolve().parents[1]
 
 GT_JSON = MODEL_DIR / "gt/cracks_uv_gt.json"
 
-# 기존 터널 texture가 있으면 여기에 둔다.
-# 없으면 자동으로 회색 texture 생성.
-BASE_TEXTURE = MODEL_DIR / "textures/tunnel_base.png"
+# True: texture 이미지를 base로 사용
+# False: BASE_COLOR로 만든 기본 단색 texture를 사용
+USE_TEXTURE_IMAGE = True
+
+# 사용할 base texture 파일명
+BASE_TEXTURE_FILENAME = "texture2.jpg"
+BASE_TEXTURE = MODEL_DIR / "texture" / BASE_TEXTURE_FILENAME
+
+# base texture 밝기 배율:
+# 1.0 = 원본 밝기, 1.0보다 크면 밝게, 1.0보다 작으면 어둡게
+BASE_TEXTURE_BRIGHTNESS = 1.0
+
+# 작은 원본 이미지를 반복 배치할 때 사용할 한 tile의 크기
+BASE_TEXTURE_TILE_W = 768
+BASE_TEXTURE_TILE_H = 512
 
 OUTPUT_TEXTURE = MODEL_DIR / "tunnel_with_cracks.png"
 OUTPUT_SIZE_GT = MODEL_DIR / "cracks/crack_texture_size_gt.csv"
@@ -30,8 +42,8 @@ TEXTURE_H = 4096
 BASE_COLOR = (200, 200, 200)
 
 # 실제 터널 모델 스케일:
-#   x: -5~5 m = 길이 10 m
-#   inner radius: 약 0.70 m = 내경 1.4 m
+# x: -5~5 m = 길이 10 m
+# inner radius: 약 0.70 m = 내경 1.4 m
 TUNNEL_LENGTH_M = 10.0
 TUNNEL_INNER_RADIUS_M = 0.70
 TUNNEL_INNER_DIAMETER_MM = TUNNEL_INNER_RADIUS_M * 2.0 * 1000.0
@@ -83,6 +95,12 @@ CRACK_TARGET_UV_CENTER = {
 # 작은 균열은 padding이 크기 오차를 크게 만들기 때문에 검증용 texture에서는 작게 둔다.
 COMPOSITE_PADDING_PX = 1
 ALPHA_CROP_MARGIN_PX = 2
+
+# 최종 tunnel texture에서 crack 바깥에 추가할 검정 테두리 두께.
+# 0이면 테두리를 추가하지 않는다.
+CRACK_OUTLINE_THICKNESS_PX = 2
+CRACK_OUTLINE_ALPHA_THRESHOLD = 32
+CRACK_OUTLINE_COLOR_RGB = (0, 0, 0)
 # =========================
 
 
@@ -104,19 +122,71 @@ def uv_to_pixel(uv, width, height):
     return [float(x), float(y)]
 
 
-def load_base_texture():
-    if BASE_TEXTURE.exists():
-        img = Image.open(BASE_TEXTURE).convert("RGBA")
-        print(f"Loaded base texture: {BASE_TEXTURE}")
-        return np.array(img)
+def make_seamless_tile(texture_rgb):
+    """반복 경계가 눈에 덜 띄도록 tile의 양쪽 가장자리를 부드럽게 맞춤"""
+    tile = texture_rgb.resize(
+        (BASE_TEXTURE_TILE_W, BASE_TEXTURE_TILE_H),
+        getattr(Image, "Resampling", Image).LANCZOS,
+    )
+    tile_array = np.array(tile, dtype=np.float32)
 
-    print("Base texture not found. Creating plain gray texture.")
+    # 반대쪽 edge의 평균값으로 시작해 안쪽으로 갈수록 원본에 합류
+    blend_x = max(2, BASE_TEXTURE_TILE_W // 8)
+    source = tile_array.copy()
+    for i in range(blend_x):
+        amount = i / (blend_x - 1)
+        edge_average = 0.5 * (source[:, i] + source[:, -1 - i])
+        tile_array[:, i] = edge_average * (1.0 - amount) + source[:, i] * amount
+        tile_array[:, -1 - i] = (
+            edge_average * (1.0 - amount) + source[:, -1 - i] * amount
+        )
+
+    blend_y = max(2, BASE_TEXTURE_TILE_H // 8)
+    source = tile_array.copy()
+    for i in range(blend_y):
+        amount = i / (blend_y - 1)
+        edge_average = 0.5 * (source[i] + source[-1 - i])
+        tile_array[i] = edge_average * (1.0 - amount) + source[i] * amount
+        tile_array[-1 - i] = (
+            edge_average * (1.0 - amount) + source[-1 - i] * amount
+        )
+
+    return np.clip(tile_array, 0, 255).astype(np.uint8)
+
+
+def create_plain_base_texture():
+    """BASE_COLOR로 채운 기본 단색 texture를 생성한다."""
     base = np.zeros((TEXTURE_H, TEXTURE_W, 4), dtype=np.uint8)
     base[:, :, 0] = BASE_COLOR[0]
     base[:, :, 1] = BASE_COLOR[1]
     base[:, :, 2] = BASE_COLOR[2]
     base[:, :, 3] = 255
     return base
+
+
+def load_base_texture():
+    if not USE_TEXTURE_IMAGE:
+        print(f"Texture image disabled. Creating plain texture: color={BASE_COLOR}")
+        return create_plain_base_texture()
+
+    if BASE_TEXTURE.exists():
+        img = Image.open(BASE_TEXTURE).convert("RGB")
+        img = ImageEnhance.Brightness(img).enhance(BASE_TEXTURE_BRIGHTNESS)
+        tile = make_seamless_tile(img)
+
+        repeats_x = math.ceil(TEXTURE_W / BASE_TEXTURE_TILE_W)
+        repeats_y = math.ceil(TEXTURE_H / BASE_TEXTURE_TILE_H)
+        base_rgb = np.tile(tile, (repeats_y, repeats_x, 1))[:TEXTURE_H, :TEXTURE_W]
+        alpha = np.full((TEXTURE_H, TEXTURE_W, 1), 255, dtype=np.uint8)
+
+        print(
+            f"Loaded base texture: {BASE_TEXTURE} "
+            f"(brightness={BASE_TEXTURE_BRIGHTNESS:.2f})"
+        )
+        return np.concatenate([base_rgb, alpha], axis=2)
+
+    print(f"Base texture not found: {BASE_TEXTURE}. Creating plain gray texture.")
+    return create_plain_base_texture()
 
 
 def resolve_source_image_path(source_image_path, crack_id):
@@ -172,6 +242,31 @@ def alpha_composite_rgba(base_rgba, overlay_rgba):
 
     out = np.concatenate([out_rgb, out_a], axis=2)
     return np.clip(out * 255.0, 0, 255).astype(np.uint8)
+
+
+def add_crack_outline(crack_rgba, thickness_px):
+    """crack의 alpha mask 바깥쪽에 불투명한 검정 테두리를 추가한다."""
+    if thickness_px <= 0:
+        return crack_rgba
+
+    alpha = crack_rgba[:, :, 3]
+    seed = np.where(
+        alpha >= CRACK_OUTLINE_ALPHA_THRESHOLD,
+        255,
+        0
+    ).astype(np.uint8)
+    kernel_size = thickness_px * 2 + 1
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (kernel_size, kernel_size)
+    )
+    dilated = cv2.dilate(seed, kernel, iterations=1)
+    outline_mask = (dilated > 0) & (seed == 0)
+
+    outlined = crack_rgba.copy()
+    outlined[outline_mask, :3] = CRACK_OUTLINE_COLOR_RGB
+    outlined[outline_mask, 3] = 255
+    return outlined
 
 
 def warp_crack_to_texture(crack_img_rgba, src_uvs, dst_uvs, out_w, out_h):
@@ -401,6 +496,7 @@ def composite_crack_by_uv_bbox(canvas, crack_rgba, dst_uvs, padding_px=2):
         (paste_w, paste_h),
         interpolation=cv2.INTER_AREA
     )
+    resized = add_crack_outline(resized, CRACK_OUTLINE_THICKNESS_PX)
 
     roi = canvas[y_min:y_max + 1, x_min:x_max + 1, :]
 
@@ -436,6 +532,11 @@ def main():
         f"inner_diameter={TUNNEL_INNER_DIAMETER_MM:.0f} mm, "
         f"unrolled_arc={TUNNEL_UNROLLED_ARC_MM:.0f} mm, "
         f"texture_u={TEXTURE_U_MIN:.1f}~{TEXTURE_U_MAX:.1f}"
+    )
+    print(
+        "Crack outline: "
+        f"thickness={CRACK_OUTLINE_THICKNESS_PX}px, "
+        f"color={CRACK_OUTLINE_COLOR_RGB}"
     )
 
     size_rows = []
